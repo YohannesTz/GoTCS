@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tile Cacher UI</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        #map {
+            height: 400px;
+            width: 100%;
+        }
+
+        /* Ensure map controls are above other elements if needed */
+        .leaflet-container {
+            z-index: 0 !important;
+        }
+
+        .leaflet-control-container {
+            z-index: 1 !important;
+        }
+
+        header {
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 md:p-8">
+
+<header class="mb-6">
+    <h1 class="text-2xl font-bold text-center">GoTCS Configuration</h1>
+    <p class="text-1x1 text-center">A simple app to cache tiles from a tile server.</p>
+</header>
+
+<div class="flex flex-col md:flex-row gap-4 md:gap-8">
+    <div class="w-full md:w-1/2">
+        <div id="map" class="bg-white rounded shadow"></div>
+        <p id="bboxDisplay" class="mt-2 text-sm text-gray-700">Click and drag on the map to select a bounding box.</p>
+    </div>
+
+    <form id="configForm" class="w-full md:w-1/2 bg-white p-4 rounded shadow space-y-4">
+        <div>
+            <label for="loadJsonFile" class="block font-semibold mb-1">Load Configuration</label>
+            <input type="file" id="loadJsonFile" accept=".json" class="mt-1 text-sm" onchange="loadJsonConfig(event)"/>
+        </div>
+        <div>
+            <label for="url_template" class="block font-semibold">URL Template for Download</label>
+            <input id="url_template" required class="w-full border rounded p-2 mt-1"
+                   value="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                   placeholder="e.g., https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+        </div>
+        <div>
+            <label for="output_dir" class="block font-semibold">Output Folder Path</label>
+            <div class="flex gap-2 mt-1">
+                <input id="output_dir" required class="w-full border rounded p-2" placeholder="/path/to/save/tiles"/>
+                <button type="button" class="bg-gray-400 text-white px-4 py-2 rounded cursor-not-allowed"
+                        title="Type or paste the path in the field">
+                    Choose
+                </button>
+            </div>
+        </div>
+        <div class="flex gap-4">
+            <div class="w-1/2">
+                <label for="min_zoom" class="block font-semibold">Min Zoom</label>
+                <input type="number" id="min_zoom" required class="w-full border rounded p-2 mt-1" value="14" min="0"
+                       max="22"/>
+            </div>
+            <div class="w-1/2">
+                <label for="max_zoom" class="block font-semibold">Max Zoom</label>
+                <input type="number" id="max_zoom" required class="w-full border rounded p-2 mt-1" value="15" min="0"
+                       max="22"/>
+            </div>
+        </div>
+        <div>
+            <label for="headers" class="block font-semibold">Headers (JSON)</label>
+            <textarea id="headers" rows="3" class="w-full border rounded p-2 mt-1 font-mono text-sm"
+                      placeholder='e.g., {"User-Agent": "MyTileDownloader/1.0"}'>{}</textarea>
+        </div>
+        <div class="flex flex-wrap gap-4">
+            <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded grow md:grow-0">
+                Start Download
+            </button>
+            <button type="button" onclick="downloadConfig()"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded grow md:grow-0">
+                Save Config
+            </button>
+        </div>
+    </form>
+</div>
+
+<section class="mt-6 bg-white p-4 rounded shadow">
+    <div class="flex items-center justify-between mb-2">
+        <h2 class="font-semibold text-lg">Command Line Preview</h2>
+        <button onclick="copyCli()" class="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded">
+            Copy CLI
+        </button>
+    </div>
+    <pre id="cli" class="bg-gray-800 text-gray-100 p-3 rounded text-sm overflow-x-auto font-mono"></pre>
+</section>
+
+<footer class="text-center py-4 mt-5 bg-light">
+    <div class="container">
+        <p class="mb-1">
+            Made with <span style="color: red;">&#10084;</span> by
+            <a href="https://github.com/yohannesTz" target="_blank" rel="noopener noreferrer">YohannesTz</a>
+        </p>
+    </div>
+</footer>
+
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""></script>
+
+<script>
+    let boundsLayer = null;
+    let startPoint = null;
+    let tempBox = null;
+    let bounds = null; // This will hold the L.latLngBounds object
+
+    // Initialize map
+    const map = L.map('map').setView([9.03, 38.74], 12); // Addis Ababa center
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // --- Map Interaction ---
+    map.on('mousedown', (e) => {
+        startPoint = e.latlng;
+
+        if (tempBox) {
+            map.removeLayer(tempBox);
+            tempBox = null;
+        }
+
+        map.dragging.disable(); // Prevent map panning while drawing box
+        map.on('mousemove', onMouseMove);
+        map.once('mouseup', onMouseUp); // Use 'once' to automatically remove listener
+    });
+
+    function onMouseMove(e) {
+        if (!startPoint) return;
+        const endPoint = e.latlng;
+        const boxBounds = L.latLngBounds(startPoint, endPoint);
+
+        if (tempBox) {
+            tempBox.setBounds(boxBounds);
+        } else {
+            // Style the temporary box differently maybe
+            tempBox = L.rectangle(boxBounds, {color: '#ff7800', weight: 1, dashArray: '5, 5'}).addTo(map);
+        }
+    }
+
+    function onMouseUp(e) {
+        map.dragging.enable();
+        map.off('mousemove', onMouseMove); // Ensure mousemove is off
+
+        if (!startPoint || !e.latlng) {
+            startPoint = null; // Reset start point if mouseup happens without movement or start
+            if (tempBox) map.removeLayer(tempBox); // Clean up temp box
+            tempBox = null;
+            return;
+        }
+
+        // Final bounds
+        bounds = L.latLngBounds(startPoint, e.latlng);
+
+        // Remove previous final layer if exists
+        if (boundsLayer) map.removeLayer(boundsLayer);
+        // Style the final selected bounds
+        boundsLayer = L.rectangle(bounds, {color: 'blue', weight: 2, fillOpacity: 0.1}).addTo(map);
+
+        // Clean up the temporary drawing box
+        if (tempBox) {
+            map.removeLayer(tempBox);
+            tempBox = null;
+        }
+
+        // Update display
+        const minLat = bounds.getSouth().toFixed(6);
+        const minLon = bounds.getWest().toFixed(6);
+        const maxLat = bounds.getNorth().toFixed(6);
+        const maxLon = bounds.getEast().toFixed(6);
+        document.getElementById("bboxDisplay").textContent = `Selected BBox: [${minLon}, ${minLat}, ${maxLon}, ${maxLat}]`;
+
+        updateCliPreview(); // Update CLI preview when bounds are set
+        startPoint = null; // Reset for next selection
+    }
+
+    // --- Form Handling & Backend Interaction ---
+
+    document.getElementById("configForm").onsubmit = async function (e) {
+        e.preventDefault(); // Prevent default form submission
+
+        if (!bounds) {
+            alert("Please select a bounding box by clicking and dragging on the map.");
+            return;
+        }
+        // Check output directory (basic check if it's not empty)
+        const outputDirValue = document.getElementById("output_dir").value.trim();
+        if (!outputDirValue) {
+            alert("Please enter an Output Folder path.");
+            return;
+        }
+
+        const minZoomVal = document.getElementById("min_zoom").value;
+        const maxZoomVal = document.getElementById("max_zoom").value;
+        if (minZoomVal === "" || maxZoomVal === "") {
+            alert("Please set valid Min and Max Zoom levels.");
+            return;
+        }
+        const min_zoom = parseInt(minZoomVal);
+        const max_zoom = parseInt(maxZoomVal);
+        if (isNaN(min_zoom) || isNaN(max_zoom) || min_zoom < 0 || max_zoom < 0 || min_zoom > max_zoom) {
+            alert("Invalid zoom levels. Ensure Min <= Max and both are non-negative.");
+            return;
+        }
+
+
+        let headersObj = {};
+        const headersJson = document.getElementById("headers").value.trim() || "{}";
+        try {
+            headersObj = JSON.parse(headersJson);
+        } catch (err) {
+            alert("Headers field contains invalid JSON: " + err.message);
+            return;
+        }
+
+        // Prepare config data for the backend /start endpoint
+        const config = {
+            url_template: document.getElementById("url_template").value,
+            output_dir: outputDirValue, // Use the trimmed value
+            min_zoom: min_zoom,
+            max_zoom: max_zoom,
+            headers: headersObj,
+            // Backend expects: [minLon, minLat, maxLon, maxLat]
+            bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+        };
+
+        // Send config to the backend /start endpoint
+        try {
+            console.log("Sending config to /start:", JSON.stringify(config)); // Log what's being sent
+            const res = await fetch("/start", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(config)
+            });
+
+            const text = await res.text();
+            // Use a more user-friendly notification (e.g., a temporary banner) instead of alert if possible
+            alert(text); // Show response from server (e.g., "✅ Download task started...")
+
+            if (!res.ok) {
+                console.error("Failed to start download:", res.status, text); // Log error details
+            }
+
+        } catch (error) {
+            alert("Error sending download request: " + error);
+            console.error("Error sending download request:", error);
+        }
+    };
+
+    // --- CLI Preview ---
+
+    function updateCliPreview() {
+        const cliPreviewElement = document.getElementById("cli");
+        if (!cliPreviewElement) return; // Guard
+
+        // Get values from the form
+        const url_template = document.getElementById("url_template")?.value || "";
+        const output_dir = document.getElementById("output_dir")?.value || ""; // Now directly editable
+        const min_zoom_val = document.getElementById("min_zoom")?.value;
+        const max_zoom_val = document.getElementById("max_zoom")?.value;
+        const headers_val = document.getElementById("headers")?.value || "{}";
+
+        // Basic validation messages for preview
+        if (!output_dir.trim()) {
+            cliPreviewElement.innerText = "// Please enter an Output Folder path.";
+            return;
+        }
+        if (!url_template.trim()) {
+            cliPreviewElement.innerText = "// Please enter a URL Template.";
+            return;
+        }
+        if (!bounds) {
+            cliPreviewElement.innerText = "// Please select a bounding box on the map.";
+            return;
+        }
+        if (!min_zoom_val || !max_zoom_val) {
+            cliPreviewElement.innerText = "// Please set Min and Max Zoom levels.";
+            return;
+        }
+        const min_zoom = parseInt(min_zoom_val);
+        const max_zoom = parseInt(max_zoom_val);
+        if (isNaN(min_zoom) || isNaN(max_zoom) || min_zoom < 0 || max_zoom < 0) {
+            cliPreviewElement.innerText = "// Please enter valid non-negative Min and Max Zoom levels.";
+            return;
+        }
+        if (min_zoom > max_zoom) {
+            cliPreviewElement.innerText = "// Min Zoom cannot be greater than Max Zoom.";
+            return;
+        }
+
+
+        // Format BBox for CLI: minLon,minLat,maxLon,maxLat
+        const bboxString = `${bounds.getWest().toFixed(6)},${bounds.getSouth().toFixed(6)},${bounds.getEast().toFixed(6)},${bounds.getNorth().toFixed(6)}`;
+
+        // Validate and escape headers JSON for CLI
+        let headersJsonString = "{}";
+        try {
+            JSON.parse(headers_val.trim() || "{}"); // Validate JSON syntax
+            headersJsonString = headers_val.trim() || "{}";
+        } catch (e) {
+            cliPreviewElement.innerText = "// Invalid JSON in Headers field.";
+            return;
+        }
+        // Escape single quotes within the JSON string for the shell command
+        const escapedHeaders = headersJsonString.replace(/'/g, "'\\''");
+
+        // Construct the CLI command preview (assuming executable is 'tile-cacher' or os.Args[0])
+        // Use placeholder './tile-cacher' for clarity
+        const cliCommand = `./tile-cacher \\
+  --url-template="${url_template}" \\
+  --output-dir="${output_dir}" \\
+  --bbox="${bboxString}" \\
+  --min-zoom=${min_zoom} \\
+  --max-zoom=${max_zoom} \\
+  --headers='${escapedHeaders}' \\
+  --workers=$(nproc || echo 8) # Optional: Adjust worker count as needed`; // Suggest nproc or a default
+
+        cliPreviewElement.innerText = cliCommand;
+    }
+
+    // Add event listeners to update CLI preview on input change
+    ["url_template", "output_dir", "min_zoom", "max_zoom", "headers"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            // Remove first to prevent duplicates if this script runs multiple times
+            el.removeEventListener("input", updateCliPreview);
+            el.addEventListener("input", updateCliPreview);
+        }
+    });
+
+    // Initial call to set preview based on default values (after map bounds check)
+    // Moved initial call inside load/default setup where bounds might exist
+
+    // --- Utility Functions ---
+
+    function copyCli() {
+        const cliText = document.getElementById("cli")?.innerText || "";
+        if (!cliText.trim() || cliText.startsWith("//")) {
+            alert("CLI preview is not ready or contains placeholder text.");
+            return;
+        }
+
+        navigator.clipboard.writeText(cliText)
+            .then(() => alert("CLI command copied to clipboard!"))
+            .catch((err) => {
+                console.error("Failed to copy CLI command:", err);
+                alert("Failed to copy CLI command. Check browser permissions or copy manually.");
+            });
+    }
+
+    function downloadConfig() {
+        const headersJson = document.getElementById("headers").value.trim() || "{}";
+        let headersObj = {};
+        try {
+            headersObj = JSON.parse(headersJson);
+        } catch (e) {
+            alert("Cannot save config: Headers field contains invalid JSON.");
+            return;
+        }
+
+        const minZoomVal = document.getElementById("min_zoom").value;
+        const maxZoomVal = document.getElementById("max_zoom").value;
+
+        const configData = {
+            // tileSource: document.getElementById("tileSource")?.value || "", // Optional map source
+            urlTemplate: document.getElementById("url_template").value,
+            outputDir: document.getElementById("output_dir").value,
+            minZoom: minZoomVal !== "" ? parseInt(minZoomVal) : null,
+            maxZoom: maxZoomVal !== "" ? parseInt(maxZoomVal) : null,
+            headers: headersObj,
+            bbox: bounds ? [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()] : null // minLon, minLat, maxLon, maxLat
+        };
+
+        const blob = new Blob([JSON.stringify(configData, null, 2)], {type: "application/json"});
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "tile-cacher-config.json";
+        document.body.appendChild(link); // Required for Firefox
+        link.click();
+        document.body.removeChild(link); // Clean up
+        URL.revokeObjectURL(link.href); // Free up memory
+    }
+
+
+    function loadJsonConfig(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+            try {
+                const config = JSON.parse(e.target.result);
+
+                // document.getElementById("tileSource").value = config.tileSource || "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"; // Optional
+                document.getElementById("url_template").value = config.urlTemplate || "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+                document.getElementById("output_dir").value = config.outputDir || "";
+                document.getElementById("min_zoom").value = config.minZoom ?? ""; // Use ?? for null/undefined check
+                document.getElementById("max_zoom").value = config.maxZoom ?? "";
+                document.getElementById("headers").value = JSON.stringify(config.headers || {}, null, 2);
+
+                if (config.bbox && config.bbox.length === 4) {
+                    // BBox format: minLon, minLat, maxLon, maxLat
+                    updateBoundingBoxOnLoad(config.bbox);
+                } else {
+                    // Reset bounds if not in config
+                    if (boundsLayer) map.removeLayer(boundsLayer);
+                    if (tempBox) map.removeLayer(tempBox);
+                    bounds = null;
+                    boundsLayer = null;
+                    tempBox = null;
+                    document.getElementById("bboxDisplay").textContent = "Click and drag on the map to select a bounding box.";
+                }
+
+                updateCliPreview(); // Update preview after loading
+                alert("Configuration loaded successfully from file.");
+
+            } catch (err) {
+                console.error("Error loading config from file:", err);
+                alert("Failed to load configuration. Invalid JSON file or format.\nError: " + err.message);
+            }
+        };
+        reader.onerror = function () {
+            alert("Error reading the configuration file.");
+            console.error("FileReader error:", reader.error);
+        }
+        reader.readAsText(file);
+
+        // Reset the file input value so the 'onchange' event fires even if the same file is selected again
+        event.target.value = null;
+    }
+
+    // Specific function to handle setting bounds from loaded config
+    function updateBoundingBoxOnLoad(bboxCoords) {
+        // Expecting [minLon, minLat, maxLon, maxLat]
+        const minLon = bboxCoords[0];
+        const minLat = bboxCoords[1];
+        const maxLon = bboxCoords[2];
+        const maxLat = bboxCoords[3];
+
+        // Validate coordinates roughly
+        if (isNaN(minLon) || isNaN(minLat) || isNaN(maxLon) || isNaN(maxLat) ||
+            minLon < -180 || maxLon > 180 || minLat < -90 || maxLat > 90 ||
+            minLon >= maxLon || minLat >= maxLat) {
+            console.warn("Invalid bbox coordinates in config file:", bboxCoords);
+            alert("Warning: Bounding box data in the configuration file seems invalid. Please re-select on the map.");
+            // Reset bounds display/state
+            if (boundsLayer) map.removeLayer(boundsLayer);
+            bounds = null;
+            boundsLayer = null;
+            document.getElementById("bboxDisplay").textContent = "Invalid BBox in config. Select new area.";
+            return;
+        }
+
+        const sw = L.latLng(minLat, minLon);
+        const ne = L.latLng(maxLat, maxLon);
+        bounds = L.latLngBounds(sw, ne); // Update the global 'bounds' variable
+
+        if (boundsLayer) map.removeLayer(boundsLayer); // Remove old layer if exists
+        boundsLayer = L.rectangle(bounds, {color: 'blue', weight: 2, fillOpacity: 0.1}).addTo(map);
+        map.fitBounds(bounds); // Adjust map view to the loaded bounds
+
+        document.getElementById("bboxDisplay").textContent = `Loaded BBox: [${minLon.toFixed(6)}, ${minLat.toFixed(6)}, ${maxLon.toFixed(6)}, ${maxLat.toFixed(6)}]`;
+    }
+
+    // Call attribution replacement when the map is ready
+    map.whenReady(() => {
+        updateCliPreview(); // Call initially after map setup
+    });
+
+</script>
+</body>
+</html>
